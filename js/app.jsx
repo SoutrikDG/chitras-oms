@@ -790,7 +790,7 @@ function NewOrderTab({ config, suggestions, onSubmit, onSaveDraft, showToast, dr
                     value={item.colour}
                     onCommit={v => updateItem(idx, 'colour', v)}
                     options={getColourSugg(item.category)}
-                    allowNew={false}
+                    allowNew={true}
                     placeholder="Type colour..."
                   />
                 </div>
