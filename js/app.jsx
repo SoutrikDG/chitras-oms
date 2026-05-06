@@ -556,6 +556,7 @@ function NewOrderTab({ config, suggestions, onSubmit, onSaveDraft, showToast, dr
     if (!subChannel) e.push('Sub-channel required');
     if (!customerName.trim()) e.push('Customer Name required');
     if (!OMS_API.isValidPhone(phone)) e.push('Phone must be exactly 10 digits');
+    if (amountPaid === '' && !payChoice) e.push('Payment required — select Full, No Payment, or enter amount');
     if (isStitching) {
       if (!stitchPrice) e.push('Stitching price required');
     } else {
@@ -1110,7 +1111,7 @@ function PendingPaymentsTab({ showToast, onPendingCountChange }) {
       const r = await OMS_API.post({
         action:   'update',
         order_id: String(o.order_id),
-        fields:   { amount_paid: totalBill }
+        fields:   { amount_paid: totalBill, order_status: 'Processing' }
       });
       if (r.status === 'success' || r._html_response) {
         showToast(`${o.customer_name} — Paid!`, 'success');
