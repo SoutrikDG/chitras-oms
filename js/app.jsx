@@ -1171,14 +1171,15 @@ function PendingPaymentsTab({ showToast, onPendingCountChange }) {
 // ═══════════════════════════════════════════════════════════════
 
 function App() {
+  const cached = OMS_API.readCachedBootstrap();
   const [authed, setAuthed]               = useState(false);
-  const [config, setConfig]               = useState(null);
+  const [config, setConfig]               = useState(cached?.config || null);
   const [configError, setConfigError]     = useState(false);
-  const [suggestions, setSuggestions]     = useState(null);
+  const [suggestions, setSuggestions]     = useState(cached?.suggestions || null);
   const [drafts, setDrafts]               = useState([]);
   const [activeTab, setActiveTab]         = useState('new');
   const [toast, setToast]                 = useState(null);
-  const [loading, setLoading]             = useState(true);
+  const [loading, setLoading]             = useState(!cached);
   const [draftToResume, setDraftToResume] = useState(null);
   const [pendingCount, setPendingCount]   = useState(0);
   const [formDirty, setFormDirty]         = useState(false);

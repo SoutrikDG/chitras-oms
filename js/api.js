@@ -4,23 +4,18 @@
  *
  * Provides the OMS_API object used throughout app.jsx.
  * Handles all communication with the Apps Script backend,
- * offline queue management, caching, and utility helpers.
+ * offline queue management, split caching (config vs suggestions), and utility helpers.
  */
 
 const OMS_API = (() => {
 
   // ─── INTERNAL STATE ───────────────────────────────────────────────────────
 
-  let _bootstrapCache = null;
-  let _bootstrapCachedAt = 0;
+  let _configCache = null;
+  let _configCachedAt = 0;
 
   // ─── CORE FETCH HELPERS ───────────────────────────────────────────────────
 
-  /**
-   * GET request to the Apps Script web app.
-   * action: string — e.g. 'getBootstrap', 'getRecentOrders'
-   * params: object — optional extra query params e.g. { offset: 5, filter: 'pending' }
-   */
   async function get(action, params = {}) {
     const url = new URL(OMS_CONFIG.API_URL);
     url.searchParams.set('action', action);
@@ -33,7 +28,6 @@ const OMS_API = (() => {
 
     const text = await res.text();
 
-    // Apps Script sometimes wraps responses in HTML on auth errors
     if (text.trim().startsWith('<')) {
       throw new Error('API returned HTML — check deployment URL and access settings');
     }
@@ -41,10 +35,6 @@ const OMS_API = (() => {
     return JSON.parse(text);
   }
 
-  /**
-   * POST request to the Apps Script web app.
-   * payload: object — must include 'action' field
-   */
   async function post(payload) {
     const res = await fetch(OMS_CONFIG.API_URL, {
       method: 'POST',
@@ -56,70 +46,134 @@ const OMS_API = (() => {
     const text = await res.text();
 
     if (text.trim().startsWith('<')) {
-      // Mark as potential success if Apps Script redirected
-      // (known Apps Script POST redirect behavior)
       return { status: 'success', _html_response: true };
     }
 
     return JSON.parse(text);
   }
 
-  // ─── BOOTSTRAP ────────────────────────────────────────────────────────────
+  // ─── BOOTSTRAP WITH SPLIT CACHE ───────────────────────────────────────────
 
-  /**
-   * Fetches config + suggestions + drafts + pending_count in one call.
-   * Uses a 5-minute in-memory cache to avoid redundant calls.
-   */
   async function getBootstrap() {
     const now = Date.now();
-    if (_bootstrapCache && (now - _bootstrapCachedAt) < OMS_CONFIG.CACHE_TTL_MS) {
-      return _bootstrapCache;
+
+    // Check in-memory config cache first (24hr TTL)
+    if (_configCache && (now - _configCachedAt) < OMS_CONFIG.CACHE_TTL_CONFIG_MS) {
+      // Config is fresh in memory, but suggestions need revalidation
+      const data = await get('getBootstrap');
+      if (data.status === 'success') {
+        _writeSuggestionsCache(data);
+        return data;
+      }
+      return _configCache; // Fallback to cached config if fetch fails
     }
 
-    // Try localStorage cache first (survives page reload)
+    // Try localStorage config cache
     try {
-      const cached = localStorage.getItem(OMS_CONFIG.CACHE_KEY);
+      const cached = localStorage.getItem(OMS_CONFIG.CACHE_KEY_CONFIG);
       if (cached) {
         const { data, ts } = JSON.parse(cached);
-        if ((now - ts) < OMS_CONFIG.CACHE_TTL_MS) {
-          _bootstrapCache = data;
-          _bootstrapCachedAt = ts;
-          return data;
+        if ((now - ts) < OMS_CONFIG.CACHE_TTL_CONFIG_MS) {
+          _configCache = data;
+          _configCachedAt = ts;
+          
+          // Config is fresh, but fetch full bootstrap to update suggestions
+          const fresh = await get('getBootstrap');
+          if (fresh.status === 'success') {
+            _writeConfigCache(fresh);
+            _writeSuggestionsCache(fresh);
+            return fresh;
+          }
+          return data; // Fallback
         }
       }
     } catch (e) { /* ignore */ }
 
+    // No valid cache — fetch fresh
     const data = await get('getBootstrap');
-
     if (data.status === 'success') {
-      _bootstrapCache = data;
-      _bootstrapCachedAt = now;
-      try {
-        localStorage.setItem(OMS_CONFIG.CACHE_KEY, JSON.stringify({ data, ts: now }));
-      } catch (e) { /* ignore */ }
+      _writeConfigCache(data);
+      _writeSuggestionsCache(data);
     }
-
     return data;
   }
 
-  /**
-   * Force-writes to the internal cache.
-   * Called by App after a fresh bootstrap fetch to keep cache warm.
-   */
-  function _cacheBootstrap(data) {
-    _bootstrapCache = data;
-    _bootstrapCachedAt = Date.now();
+  function readCachedBootstrap() {
+    const now = Date.now();
+
+    // Try in-memory first
+    if (_configCache && (now - _configCachedAt) < OMS_CONFIG.CACHE_TTL_CONFIG_MS) {
+      const suggestions = _readSuggestionsCache();
+      return {
+        status: 'success',
+        config: _configCache.config,
+        suggestions: suggestions?.suggestions || {},
+        drafts: [],
+        pending_count: 0
+      };
+    }
+
+    // Try localStorage
     try {
-      localStorage.setItem(OMS_CONFIG.CACHE_KEY, JSON.stringify({ data, ts: _bootstrapCachedAt }));
+      const configCached = localStorage.getItem(OMS_CONFIG.CACHE_KEY_CONFIG);
+      if (configCached) {
+        const { data, ts } = JSON.parse(configCached);
+        if ((now - ts) < OMS_CONFIG.CACHE_TTL_CONFIG_MS) {
+          _configCache = data;
+          _configCachedAt = ts;
+
+          const suggestions = _readSuggestionsCache();
+          return {
+            status: 'success',
+            config: data.config,
+            suggestions: suggestions?.suggestions || {},
+            drafts: [],
+            pending_count: 0
+          };
+        }
+      }
     } catch (e) { /* ignore */ }
+
+    return null;
+  }
+
+  function _writeConfigCache(data) {
+    _configCache = data;
+    _configCachedAt = Date.now();
+    try {
+      localStorage.setItem(OMS_CONFIG.CACHE_KEY_CONFIG, JSON.stringify({
+        data,
+        ts: _configCachedAt
+      }));
+    } catch (e) { /* ignore */ }
+  }
+
+  function _writeSuggestionsCache(data) {
+    try {
+      localStorage.setItem(OMS_CONFIG.CACHE_KEY_SUGGESTIONS, JSON.stringify({
+        suggestions: data.suggestions,
+        ts: Date.now()
+      }));
+    } catch (e) { /* ignore */ }
+  }
+
+  function _readSuggestionsCache() {
+    try {
+      const cached = localStorage.getItem(OMS_CONFIG.CACHE_KEY_SUGGESTIONS);
+      if (!cached) return null;
+      return JSON.parse(cached);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function _cacheBootstrap(data) {
+    _writeConfigCache(data);
+    _writeSuggestionsCache(data);
   }
 
   // ─── OFFLINE QUEUE ────────────────────────────────────────────────────────
 
-  /**
-   * Adds a complete order payload to the offline queue in localStorage.
-   * Returns the new queue length.
-   */
   function addToOfflineQueue(payload) {
     const queue = _getQueue();
     queue.push({ payload, queued_at: new Date().toISOString() });
@@ -127,17 +181,10 @@ const OMS_API = (() => {
     return queue.length;
   }
 
-  /**
-   * Returns the number of orders currently in the offline queue.
-   */
   function getOfflineCount() {
     return _getQueue().length;
   }
 
-  /**
-   * Attempts to submit all queued offline orders.
-   * Returns { synced: N, failed: M }
-   */
   async function syncOfflineQueue() {
     const queue = _getQueue();
     if (!queue.length) return { synced: 0, failed: 0 };
@@ -178,12 +225,6 @@ const OMS_API = (() => {
 
   // ─── SUB-CHANNEL HELPER ───────────────────────────────────────────────────
 
-  /**
-   * Returns the correct sub-channel options based on selected channel.
-   * Online  → Whatsapp, Instagram, Facebook
-   * Offline → Flea-market, Exhibition, Studio
-   * Falls back to full REF_SubChannel list if channel not set.
-   */
   function getSubChannels(config, channel) {
     const all = (config && config.REF_SubChannel) ? config.REF_SubChannel : [];
     if (!channel) return all;
@@ -198,12 +239,6 @@ const OMS_API = (() => {
 
   // ─── SKU HELPER ───────────────────────────────────────────────────────────
 
-  /**
-   * Builds a partial SKU from an item object for price suggestion lookups.
-   * Matches the format used in coresystem.gs generateSku:
-   * DIV-FAB-CAT-SUB-COL-SIZ
-   * Uses UNK for missing fields — caller checks for UNK to decide if usable.
-   */
   function buildPartialSku(item) {
     const seg = (val, len, fallback) => {
       const str = String(val || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -222,11 +257,6 @@ const OMS_API = (() => {
 
   // ─── DATE HELPER ─────────────────────────────────────────────────────────
 
-  /**
-   * Returns today's date as YYYY-MM-DD in local time (IST-safe).
-   * Uses the device's local date — no timezone conversion needed
-   * since the user is always in IST.
-   */
   function todayLocal() {
     const d = new Date();
     const yyyy = d.getFullYear();
@@ -237,9 +267,6 @@ const OMS_API = (() => {
 
   // ─── VALIDATION HELPERS ───────────────────────────────────────────────────
 
-  /**
-   * Validates that a phone number is exactly 10 digits.
-   */
   function isValidPhone(phone) {
     const cleaned = String(phone || '').replace(/\D/g, '');
     return cleaned.length === 10;
@@ -247,10 +274,6 @@ const OMS_API = (() => {
 
   // ─── STRING HELPERS ───────────────────────────────────────────────────────
 
-  /**
-   * Converts a string to Title Case.
-   * e.g. "john doe" → "John Doe"
-   */
   function toTitleCase(str) {
     return String(str || '')
       .replace(/\w\S*/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
@@ -262,6 +285,7 @@ const OMS_API = (() => {
     get,
     post,
     getBootstrap,
+    readCachedBootstrap,
     _cacheBootstrap,
     addToOfflineQueue,
     getOfflineCount,

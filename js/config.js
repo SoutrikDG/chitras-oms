@@ -8,9 +8,11 @@ const OMS_CONFIG = {
     division: '', fabric: '', category: '', sub_category: '',
     size: '', colour: '', quantity: 1, base_price: ''
   },
-  OFFLINE_KEY:  'chitras_offline_queue',
-  CACHE_KEY:    'chitras_bootstrap_cache',
-  CACHE_TTL_MS: 5 * 60 * 1000,
+  OFFLINE_KEY:           'chitras_offline_queue',
+  CACHE_KEY_CONFIG:      'chitras_config_cache',      // 24hr cache
+  CACHE_KEY_SUGGESTIONS: 'chitras_suggestions_cache', // SWR cache
+  CACHE_TTL_CONFIG_MS:   24 * 60 * 60 * 1000,        // 24 hours
+  CACHE_TTL_SUGGESTIONS_MS: 5 * 60 * 1000,           // 5 min (but always revalidate)
   MAX_DRAFTS:   5,
   DEFAULT_ORDER_TYPE: 'Product'
 };
