@@ -15,6 +15,51 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
 // ═══════════════════════════════════════════════════════════════
+// ERROR BOUNDARY
+// ═══════════════════════════════════════════════════════════════
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, info) {
+    console.error('[Chitras] Render crash caught by ErrorBoundary:', error, info);
+    try {
+      const log = JSON.parse(localStorage.getItem('chitras_crash_log') || '[]');
+      log.push({ ts: new Date().toISOString(), msg: String(error?.message || error), stack: String(error?.stack || '').slice(0, 2000) });
+      localStorage.setItem('chitras_crash_log', JSON.stringify(log.slice(-10)));
+    } catch (e) { /* ignore */ }
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="pin-screen">
+          <div style={{ textAlign: 'center', padding: 24 }}>
+            <h1 style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 36, fontWeight: 700, color: 'var(--terra-900)' }}>
+              Chitras
+            </h1>
+            <div style={{ fontSize: 32, margin: '16px 0' }}>⚠</div>
+            <p style={{ fontSize: 14, color: 'var(--red)', fontWeight: 500 }}>Something went wrong</p>
+            <p style={{ fontSize: 12, color: '#8B6F5E', marginTop: 8, maxWidth: 300, margin: '8px auto' }}>
+              {String(this.state.error?.message || 'Unknown error')}
+            </p>
+            <button
+              className="submit-btn submit-primary"
+              style={{ marginTop: 16 }}
+              onClick={() => window.location.reload()}
+            >Reload</button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // HOOKS
 // ═══════════════════════════════════════════════════════════════
 function useOnlineStatus() {
@@ -516,16 +561,23 @@ function NewOrderTab({ config, suggestions, onSubmit, onSaveDraft, showToast, dr
   const subChannelOptions = OMS_API.getSubChannels(localConfig, channel);
 
   const getCategorySugg = (fabric) => {
-    const aff = suggestions?.fabric_category_affinity?.[fabric] || [];
-    const all = localConfig?.REF_Category || [];
+    const aff = Array.isArray(suggestions?.fabric_category_affinity?.[fabric])
+      ? suggestions.fabric_category_affinity[fabric].filter(Boolean)
+      : [];
+    const all = Array.isArray(localConfig?.REF_Category) ? localConfig.REF_Category.filter(Boolean) : [];
     return [...aff, ...all.filter(c => !aff.includes(c))];
   };
 
   const getColourSugg = (category) => {
-    const fromData   = suggestions?.colour_by_category?.[category] || [];
-    const fromConfig = localConfig?.REF_Colour || [];
+    const fromData   = Array.isArray(suggestions?.colour_by_category?.[category])
+      ? suggestions.colour_by_category[category].filter(Boolean)
+      : [];
+    const fromConfig = Array.isArray(localConfig?.REF_Colour) ? localConfig.REF_Colour.filter(Boolean) : [];
     const merged = [...fromData];
-    fromConfig.forEach(c => { if (!merged.some(m => m.toLowerCase() === c.toLowerCase())) merged.push(c); });
+    fromConfig.forEach(c => {
+      const s = String(c || '');
+      if (s && !merged.some(m => String(m || '').toLowerCase() === s.toLowerCase())) merged.push(c);
+    });
     return merged;
   };
 
@@ -538,9 +590,14 @@ function NewOrderTab({ config, suggestions, onSubmit, onSaveDraft, showToast, dr
   const custFiltered = useMemo(() => {
     if (!customerName || customerName.length < 2) return [];
     const q = customerName.toLowerCase();
-    return (suggestions?.customers || []).filter(c =>
-      c.name.toLowerCase().includes(q) || c.phone.includes(customerName)
-    ).slice(0, 5);
+    return (suggestions?.customers || [])
+      .filter(c => c && (c.name || c.phone))
+      .filter(c => {
+        const name = String(c.name || '').toLowerCase();
+        const phone = String(c.phone || '');
+        return name.includes(q) || phone.includes(customerName);
+      })
+      .slice(0, 5);
   }, [customerName, suggestions]);
 
   const selectCustomer = (c) => {
@@ -604,10 +661,12 @@ function NewOrderTab({ config, suggestions, onSubmit, onSaveDraft, showToast, dr
     setErrors([]);
     setSubmitting(true);
     const payload = buildPayload();
+    let submittedOk = false;
     try {
       if (!navigator.onLine) {
         const cnt = OMS_API.addToOfflineQueue(payload);
         showToast(`Order queued offline (${cnt} pending)`, 'success');
+        submittedOk = true;
       } else {
         const r = await OMS_API.post(payload);
         if (r.status === 'success' || r._html_response) {
@@ -615,20 +674,25 @@ function NewOrderTab({ config, suggestions, onSubmit, onSaveDraft, showToast, dr
           if (activeDraftId) {
             try { await OMS_API.post({ action: 'deleteDraft', draft_id: activeDraftId }); } catch (e) { /* ignore */ }
           }
-          if (onSubmit) onSubmit();
+          submittedOk = true;
         } else {
           showToast(r.message || 'Failed', 'error');
           setSubmitting(false);
           return;
         }
       }
-      resetForm();
     } catch (err) {
       OMS_API.addToOfflineQueue(payload);
       showToast('Queued offline', 'success');
-      resetForm();
+      submittedOk = true;
     }
     setSubmitting(false);
+    if (submittedOk) {
+      resetForm();
+      if (onSubmit) {
+        setTimeout(() => { try { onSubmit(); } catch (e) { /* ignore */ } }, 0);
+      }
+    }
   };
 
   const handleSaveDraft = async () => {
@@ -659,7 +723,7 @@ function NewOrderTab({ config, suggestions, onSubmit, onSaveDraft, showToast, dr
     setOrderNotes(''); setShowNotes(false);
     setStitchDesc(''); setStitchPrice('');
     setErrors([]); setActiveDraftId(null);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    try { window.scrollTo(0, 0); } catch (e) { /* ignore */ }
   };
 
   return (
@@ -1195,9 +1259,9 @@ function App() {
       try {
         const d = await OMS_API.getBootstrap();
         if (d.status === 'success') {
-          setConfig(d.config);
-          setSuggestions(d.suggestions);
-          setDrafts(d.drafts || []);
+          if (d.config)      setConfig(d.config);
+          if (d.suggestions) setSuggestions(d.suggestions);
+          setDrafts(Array.isArray(d.drafts) ? d.drafts : []);
           setPendingCount(d.pending_count || 0);
         } else {
           setConfigError(true);
@@ -1214,11 +1278,12 @@ function App() {
     OMS_API.syncOfflineQueue().then(r => {
       if (r.synced > 0) showToast(`Synced ${r.synced} offline order(s)`, 'success');
     });
-    OMS_API.get('getBootstrap').then(d => {
+    OMS_API.get('getBootstrap').then(raw => {
+      const d = OMS_API._sanitizeBootstrap(raw);
       if (d.status === 'success') {
-        setConfig(d.config);
-        setSuggestions(d.suggestions);
-        setDrafts(d.drafts || []);
+        if (d.config)      setConfig(d.config);
+        if (d.suggestions) setSuggestions(d.suggestions);
+        setDrafts(Array.isArray(d.drafts) ? d.drafts : []);
         setPendingCount(d.pending_count || 0);
         OMS_API._cacheBootstrap(d);
       }
@@ -1235,11 +1300,11 @@ function App() {
 
   const refresh = async () => {
     try {
-      const d = await OMS_API.get('getBootstrap');
+      const d = OMS_API._sanitizeBootstrap(await OMS_API.get('getBootstrap'));
       if (d.status === 'success') {
-        setConfig(d.config);
-        setSuggestions(d.suggestions);
-        setDrafts(d.drafts || []);
+        if (d.config)      setConfig(d.config);
+        if (d.suggestions) setSuggestions(d.suggestions);
+        setDrafts(Array.isArray(d.drafts) ? d.drafts : []);
         setPendingCount(d.pending_count || 0);
         OMS_API._cacheBootstrap(d);
       }
@@ -1342,4 +1407,8 @@ function App() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <ErrorBoundary>
+    <App />
+  </ErrorBoundary>
+);

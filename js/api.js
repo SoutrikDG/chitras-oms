@@ -54,13 +54,27 @@ const OMS_API = (() => {
 
   // ─── BOOTSTRAP WITH SPLIT CACHE ───────────────────────────────────────────
 
+  function _sanitizeBootstrap(data) {
+    if (!data || data.status !== 'success') return data;
+    try {
+      if (data.suggestions && Array.isArray(data.suggestions.customers)) {
+        data.suggestions.customers = data.suggestions.customers
+          .filter(c => c && (c.name != null || c.phone != null))
+          .map(c => ({
+            name: String(c.name == null ? '' : c.name),
+            phone: String(c.phone == null ? '' : c.phone)
+          }));
+      }
+    } catch (e) { /* ignore */ }
+    return data;
+  }
   async function getBootstrap() {
     const now = Date.now();
 
     // Check in-memory config cache first (24hr TTL)
     if (_configCache && (now - _configCachedAt) < OMS_CONFIG.CACHE_TTL_CONFIG_MS) {
       // Config is fresh in memory, but suggestions need revalidation
-      const data = await get('getBootstrap');
+      const data = _sanitizeBootstrap(await get('getBootstrap'));
       if (data.status === 'success') {
         _writeSuggestionsCache(data);
         return data;
@@ -78,7 +92,7 @@ const OMS_API = (() => {
           _configCachedAt = ts;
           
           // Config is fresh, but fetch full bootstrap to update suggestions
-          const fresh = await get('getBootstrap');
+          const fresh = _sanitizeBootstrap(await get('getBootstrap'));
           if (fresh.status === 'success') {
             _writeConfigCache(fresh);
             _writeSuggestionsCache(fresh);
@@ -90,7 +104,7 @@ const OMS_API = (() => {
     } catch (e) { /* ignore */ }
 
     // No valid cache — fetch fresh
-    const data = await get('getBootstrap');
+    const data = _sanitizeBootstrap(await get('getBootstrap'));
     if (data.status === 'success') {
       _writeConfigCache(data);
       _writeSuggestionsCache(data);
@@ -285,6 +299,7 @@ const OMS_API = (() => {
     get,
     post,
     getBootstrap,
+    _sanitizeBootstrap,
     readCachedBootstrap,
     _cacheBootstrap,
     addToOfflineQueue,
