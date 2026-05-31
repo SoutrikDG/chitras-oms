@@ -1,0 +1,56 @@
+# Chitras OMS — KT Dispatch
+# Fires on every push to main. Collects the diff and commit info,
+# then dispatches a repository_dispatch event to the private docs repo.
+name: KT Dispatch
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '*.md'
+      - '.github/**'
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout with history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          
+      - name: Collect commit context
+        id: ctx
+        run: |
+          # Get diff (truncated to 6000 chars to stay within dispatch payload limits)
+          DIFF=$(git diff HEAD~1..HEAD 2>/dev/null | head -c 6000 || echo "initial commit")
+          echo "diff<<DIFF_DELIM" >> "$GITHUB_OUTPUT"
+          echo "$DIFF" >> "$GITHUB_OUTPUT"
+          echo "DIFF_DELIM" >> "$GITHUB_OUTPUT"
+          
+          # Get commit message
+          MSG=$(git log -1 --pretty=%B)
+          echo "message<<MSG_DELIM" >> "$GITHUB_OUTPUT"
+          echo "$MSG" >> "$GITHUB_OUTPUT"
+          echo "MSG_DELIM" >> "$GITHUB_OUTPUT"
+          
+          # Get short hash
+          echo "hash=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          
+          # Get changed files
+          FILES=$(git diff --name-only HEAD~1..HEAD 2>/dev/null | tr '\n' ',' | sed 's/,$//' || echo "unknown")
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          
+      - name: Dispatch to docs repo
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DOCS_REPO_TOKEN }}
+          repository: SoutrikDG/chitras-oms-docs
+          event-type: code-pushed
+          client-payload: >-
+            {
+              "diff": ${{ toJSON(steps.ctx.outputs.diff) }},
+              "message": ${{ toJSON(steps.ctx.outputs.message) }},
+              "hash": "${{ steps.ctx.outputs.hash }}",
+              "files": "${{ steps.ctx.outputs.files }}"
+            }
