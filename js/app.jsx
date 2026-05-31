@@ -1150,7 +1150,8 @@ function PendingPaymentsTab({ showToast, onPendingCountChange }) {
   const [orders, setOrders]           = useState([]);
   const [loading, setLoading]         = useState(true);
   const [confirmOrder, setConfirmOrder] = useState(null);
-  const [dismissingId, setDismissingId] = useState(null);
+  const [dismissingIds, setDismissingIds] = useState(new Set());
+  const syncTimerRef = useRef(null);
   const [refreshing, setRefreshing]     = useState(false);
   useEffect(() => {
     if (!document.getElementById('oms-anim-spin')) {
@@ -1193,6 +1194,24 @@ function PendingPaymentsTab({ showToast, onPendingCountChange }) {
   const doMarkPaid = async () => {
     const o = confirmOrder;
     setConfirmOrder(null);
+
+    // Step 1: Immediately trigger exit animation (before API responds)
+    setDismissingIds(prev => new Set([...prev, o.order_id]));
+
+    // Step 2: After animation completes (300ms), optimistically remove from local state
+    setTimeout(() => {
+      setDismissingIds(prev => { const next = new Set(prev); next.delete(o.order_id); return next; });
+      setOrders(prev => {
+        const updated = prev.filter(x => x.order_id !== o.order_id);
+        if (onPendingCountChange) {
+          const distinctCustomers = new Set(updated.map(x => x.customer_name)).size;
+          onPendingCountChange(distinctCustomers);
+        }
+        return updated;
+      });
+    }, 300);
+
+    // Step 3: Fire API call in parallel — rollback on failure
     try {
       const totalBill = parseFloat(o.total_bill_amount) || 0;
       const r = await OMS_API.post({
@@ -1202,30 +1221,24 @@ function PendingPaymentsTab({ showToast, onPendingCountChange }) {
       });
       if (r.status === 'success' || r._html_response) {
         showToast(`${o.customer_name} — Paid!`, 'success');
-
-        // Step 1: Trigger exit animation
-        setDismissingId(o.order_id);
-
-        // Step 2: After animation completes, remove from local state (optimistic)
-        setTimeout(() => {
-          setDismissingId(null);
-          setOrders(prev => {
-            const updated = prev.filter(x => x.order_id !== o.order_id);
-            if (onPendingCountChange) {
-              const distinctCustomers = new Set(updated.map(x => x.customer_name)).size;
-              onPendingCountChange(distinctCustomers);
-            }
-            return updated;
-          });
-
-          // Step 3: Silent background sync to get authoritative data
-          load(true);
-        }, 300);
+        // Debounced silent sync — collapses rapid-fire calls into one fetch
+        if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+        syncTimerRef.current = setTimeout(() => load(true), 600);
       } else {
-        showToast(r.message || 'Update failed — try again', 'error');
+        // Rollback: re-insert the order and let background sync correct position
+        showToast(r.message || 'Update failed — order restored', 'error');
+        setOrders(prev => [o, ...prev]);
+        if (onPendingCountChange) {
+          setOrders(curr => {
+            onPendingCountChange(new Set(curr.map(x => x.customer_name)).size);
+            return curr;
+          });
+        }
       }
     } catch (err) {
-      showToast('Network error — check connection', 'error');
+      // Rollback on network error
+      showToast('Network error — order restored', 'error');
+      setOrders(prev => [o, ...prev]);
     }
   };
 
@@ -1262,7 +1275,7 @@ function PendingPaymentsTab({ showToast, onPendingCountChange }) {
               <div style={{ color: '#8B6F5E' }}>All payments received!</div>
             </div>
           : <div>{orders.map(o => {
-              const isDismissing = dismissingId === o.order_id;
+              const isDismissing = dismissingIds.has(o.order_id);
               return (
                 <div
                   key={o.order_id}
