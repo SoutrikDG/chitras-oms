@@ -1150,9 +1150,19 @@ function PendingPaymentsTab({ showToast, onPendingCountChange }) {
   const [orders, setOrders]           = useState([]);
   const [loading, setLoading]         = useState(true);
   const [confirmOrder, setConfirmOrder] = useState(null);
+  const [dismissingId, setDismissingId] = useState(null);
+  const [refreshing, setRefreshing]     = useState(false);
+  useEffect(() => {
+    if (!document.getElementById('oms-anim-spin')) {
+      const style = document.createElement('style');
+      style.id = 'oms-anim-spin';
+      style.textContent = '@keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }';
+      document.head.appendChild(style);
+    }
+  }, []);
 
-  const load = async () => {
-    setLoading(true);
+  const load = async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const d = await OMS_API.get('getRecentOrders', { filter: 'pending' });
       if (d.status === 'success') {
@@ -1160,12 +1170,25 @@ function PendingPaymentsTab({ showToast, onPendingCountChange }) {
         if (onPendingCountChange) onPendingCountChange(d.total_distinct_orders || 0);
       }
     } catch (e) {
-      showToast('Failed to load', 'error');
+      if (!silent) showToast('Failed to load', 'error');
     }
-    setLoading(false);
+    if (!silent) setLoading(false);
   };
 
   useEffect(() => { load(); }, []);
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      const d = await OMS_API.get('getRecentOrders', { filter: 'pending' });
+      if (d.status === 'success') {
+        setOrders(d.orders);
+        if (onPendingCountChange) onPendingCountChange(d.total_distinct_orders || 0);
+      }
+    } catch (e) {
+      showToast('Failed to refresh', 'error');
+    }
+    setRefreshing(false);
+  };
 
   const doMarkPaid = async () => {
     const o = confirmOrder;
@@ -1179,7 +1202,25 @@ function PendingPaymentsTab({ showToast, onPendingCountChange }) {
       });
       if (r.status === 'success' || r._html_response) {
         showToast(`${o.customer_name} — Paid!`, 'success');
-        load();
+
+        // Step 1: Trigger exit animation
+        setDismissingId(o.order_id);
+
+        // Step 2: After animation completes, remove from local state (optimistic)
+        setTimeout(() => {
+          setDismissingId(null);
+          setOrders(prev => {
+            const updated = prev.filter(x => x.order_id !== o.order_id);
+            if (onPendingCountChange) {
+              const distinctCustomers = new Set(updated.map(x => x.customer_name)).size;
+              onPendingCountChange(distinctCustomers);
+            }
+            return updated;
+          });
+
+          // Step 3: Silent background sync to get authoritative data
+          load(true);
+        }, 300);
       } else {
         showToast(r.message || 'Update failed — try again', 'error');
       }
@@ -1196,8 +1237,13 @@ function PendingPaymentsTab({ showToast, onPendingCountChange }) {
         <h2 style={{ fontFamily: "'Cormorant Garamond',serif", fontSize: 22, fontWeight: 700, margin: 0 }}>
           Pending Payments
         </h2>
-        <button style={{ fontSize: 12, color: 'var(--terra-500)', background: 'none', border: 'none', cursor: 'pointer' }} onClick={load}>
-          Refresh
+        <button
+          style={{ fontSize: 12, color: 'var(--terra-500)', background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}
+          onClick={handleRefresh}
+          disabled={refreshing}
+        >
+          <span style={refreshing ? { display: 'inline-block', animation: 'spin 1s linear infinite' } : {}}>↻</span>
+          {refreshing ? 'Syncing...' : 'Refresh'}
         </button>
       </div>
       {totalDue > 0 && (
@@ -1215,7 +1261,23 @@ function PendingPaymentsTab({ showToast, onPendingCountChange }) {
               <div style={{ fontSize: 32, marginBottom: 8 }}>✓</div>
               <div style={{ color: '#8B6F5E' }}>All payments received!</div>
             </div>
-          : <div>{orders.map(o => <OrderCard key={o.order_id} order={o} showMarkPaid onMarkPaid={o => setConfirmOrder(o)} />)}</div>
+          : <div>{orders.map(o => {
+              const isDismissing = dismissingId === o.order_id;
+              return (
+                <div
+                  key={o.order_id}
+                  style={{
+                    transition: 'opacity 0.3s ease, max-height 0.3s ease, margin 0.3s ease, padding 0.3s ease',
+                    opacity: isDismissing ? 0 : 1,
+                    maxHeight: isDismissing ? 0 : 500,
+                    marginBottom: isDismissing ? 0 : undefined,
+                    overflow: 'hidden'
+                  }}
+                >
+                  <OrderCard order={o} showMarkPaid onMarkPaid={o => setConfirmOrder(o)} />
+                </div>
+              );
+            })}</div>
       }
       {confirmOrder && (
         <ConfirmModal
